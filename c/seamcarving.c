@@ -8,32 +8,36 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-long long get_utime()
-{
-    struct timeval t;
-    gettimeofday(&t, 0);
-    return (long long)t.tv_sec * 1000000 + t.tv_usec;
-}
-
-static long long clockP;
-void startClock(){
-    clockP = get_utime();
-}
-void printClock(){
-    // Evaluation
-    long long tEnd = get_utime();
-    double delta = (tEnd - clockP) / 1000000.0;
-    printf("total time: %lf\n", delta);
-}
-
-
 static void die(const char* msg){
     perror(msg);
     exit(EXIT_FAILURE);
 }
-static void GreyScaleRGBImage(const unsigned char *img,unsigned char *result, size_t width, size_t height){
-    float gamma = 2.2f;
+// alternative implementation of rgb2gray
+// static void rgb2gray_alt(const unsigned char *img,unsigned char *result, size_t width, size_t height){
+//     float gamma = 2.2f;
     
+//     #pragma omp parallel for
+//     for(size_t y = 0; y < height;y++){
+//         size_t pos = y * width*3;
+//         for(size_t x=0;x<width*3;x+=3){
+//             pos +=3; 
+//             float R = img[pos+0];
+//             float G = img[pos+1];
+//             float B = img[pos+2];
+//             float Clin = 0.2126f * powf(R,gamma) + 0.7152f * powf(G,gamma) + 0.0722f * powf(B,gamma);
+//             float Csrgb = 0;
+//             if(Clin <= 0.0031308f){
+//                 Csrgb = 12.92f * Clin;
+//             }else{
+//                 Csrgb = 1.055f * powf(Clin,1/2.4f)-0.055f;
+//             }
+//             result[y*width+x/3] =(char)Csrgb;
+//         }
+//     }
+// }
+
+
+static void rgb2gray(const unsigned char *img,unsigned char *result, size_t width, size_t height){
     #pragma omp parallel for
     for(size_t y = 0; y < height;y++){
         size_t pos = y * width*3;
@@ -42,18 +46,11 @@ static void GreyScaleRGBImage(const unsigned char *img,unsigned char *result, si
             float R = img[pos+0];
             float G = img[pos+1];
             float B = img[pos+2];
-            float Clin = 0.2126f * powf(R,gamma) + 0.7152f * powf(G,gamma) + 0.0722f * powf(B,gamma);
-            float Csrgb = 0;
-            if(Clin <= 0.0031308f){
-                Csrgb = 12.92f * Clin;
-            }else{
-                Csrgb = 1.055f * powf(Clin,1/2.4f)-0.055f;
-            }
-            result[y*width+x/3] =(char)Csrgb;
+            float grey = 0.2989f * R + 0.5870f * G + 0.1140 * B;
+            result[y*width+x/3] =(char)grey;
         }
     }
 }
-
 
 /*
     @param img: input img of size width*height
@@ -185,6 +182,7 @@ static void clearArray(unsigned char *array, size_t width, size_t height){
 
 int main(int argc, char **argv)
 {
+    int greedy = 0; // greedy version does not recalculate the kernel image. May lead to artifacts
     printf("Running using %d threads!\n", omp_get_max_threads());
     if (argc != 3) {
         printf("USAGE: {targetIMG} {numberOfIter}\n");
@@ -199,6 +197,7 @@ int main(int argc, char **argv)
     if(img == NULL) die("ERROR loading Image");
     if(img_c!=3) printf("WARNING UNSUPPORTED OPERATION: Image has %d channels per pixel. Output will contain %d channels per pixel\n", img_c , 3);
     
+    if (img_w < 3 || img_h < 3) die("Image is too small");
     
     unsigned char *greyImg = (unsigned char*) calloc(img_w*img_h,sizeof(unsigned char));
     if(greyImg==NULL) die("Could not alloc greyImg");
@@ -206,7 +205,7 @@ int main(int argc, char **argv)
     if(greyImg==NULL) die("Could not alloc kernelImg");
 
     // convert to grey scale
-    GreyScaleRGBImage(img,greyImg,img_w,img_h);
+    rgb2gray(img,greyImg,img_w,img_h);
 
 
     float *energyMap = (float*) calloc((img_w)*(img_h),sizeof(*energyMap));
@@ -221,20 +220,37 @@ int main(int argc, char **argv)
     
     unsigned int path[img_h];
     int iter = atoi(argv[2]);
+    if (iter > img_w-1) die("Number of iterations is too large. It cannot be larger than the width of the image minus 1");
+    
     for(int i=0;i<iter;i++){
         if (i%50==0)
             printf("Iteration: %d\n",i);
-        
+        if (!greedy){
+            applyKernel(greyImg,kernelImg,img_w,img_h,sobelX,1);
+            applyKernel(greyImg,kernelImg,img_w,img_h,sobelY,0.5f);
+        }
+
         getEnergyMap(kernelImg,energyMap,img_w,img_h);
         greedyPath(energyMap,path,img_w,img_h);
-        removeSeam(kernelImg,kernelImg,img_w,img_h,path);
+        
+        if (greedy){
+            removeSeam(kernelImg,kernelImg,img_w,img_h,path);
+        }else{
+            removeSeam(greyImg,greyImg,img_w,img_h,path);
+        }
         removeSeamRGB(img,img,img_w,img_h,path);
         img_w--;
     }
     
-    // GreyScaleRGBImage(img,greyImg,img_w,img_h);
+    rgb2gray(img,greyImg,img_w,img_h);
     // fillSeam(greyImg,img_w,img_h,path);
-    // stbi_write_jpg("wr6x5_regular_new.jpg",img_w,img_h, 3,img,100 );
+    stbi_write_jpg("out_rgb.jpg",img_w,img_h, 3,img,100 );
 
     stbi_write_jpg("out.jpg",img_w,img_h, 1,greyImg,100 );
+
+    free(greyImg);
+    free(kernelImg);
+    free(energyMap);
+    stbi_image_free(img);
+    
 }
